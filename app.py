@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -30,9 +31,31 @@ from tkinter import filedialog, messagebox, ttk
 import secure_storage
 from twilio_backend import ProvisioningError, TwilioBackend, sha256_bytes, sha256_file
 
-APP_DIR = Path(__file__).resolve().parent
+# Two different base directories are needed once this is frozen into a
+# PyInstaller executable:
+#
+#   APP_DIR      — where config.json is read/written. This must be next
+#                   to the actual .exe/binary so it persists between
+#                   runs. `sys.executable` gives that path when frozen;
+#                   `__file__` does NOT — under PyInstaller it points
+#                   inside a temporary extraction folder that's deleted
+#                   when the app closes, which would silently make the
+#                   "saved credentials" and hash-based change-detection
+#                   features forget everything on every run.
+#
+#   RESOURCE_DIR — where bundled read-only files (functions/voice.js)
+#                   are read from. In --onefile mode these are unpacked
+#                   into sys._MEIPASS at startup, not next to the exe,
+#                   so this deliberately does NOT use APP_DIR.
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+else:
+    APP_DIR = Path(__file__).resolve().parent
+    RESOURCE_DIR = APP_DIR
+
 CONFIG_PATH = APP_DIR / "config.json"
-FUNCTION_SOURCE_PATH = APP_DIR / "functions" / "voice.js"
+FUNCTION_SOURCE_PATH = RESOURCE_DIR / "functions" / "voice.js"
 
 DIGITS = [str(n) for n in range(1, 10)]
 
@@ -224,18 +247,57 @@ class ChurchPhoneLineApp(tk.Tk):
         self.welcome_frame = ttk.LabelFrame(self, text="Welcome message")
         self.welcome_frame.pack(fill="x", padx=10, pady=6)
 
-        ttk.Label(self.welcome_frame, text="Welcome message MP3").grid(
-            row=0, column=0, sticky="w", padx=4, pady=2
+        self.welcome_mode_var = tk.StringVar(value="upload")
+        ttk.Radiobutton(
+            self.welcome_frame, text="Upload an MP3", variable=self.welcome_mode_var,
+            value="upload", command=self._refresh_welcome_mode,
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(4, 0))
+        ttk.Radiobutton(
+            self.welcome_frame, text="Type a message (spoken with text-to-speech)",
+            variable=self.welcome_mode_var, value="tts", command=self._refresh_welcome_mode,
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=(4, 0), columnspan=2)
+
+        # -- Upload sub-section --
+        self.welcome_upload_row = ttk.Frame(self.welcome_frame)
+        self.welcome_upload_row.grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=4)
+        ttk.Label(self.welcome_upload_row, text="Welcome message MP3").grid(
+            row=0, column=0, sticky="w"
         )
-        self.welcome_label = ttk.Label(self.welcome_frame, text="No file chosen", foreground="grey")
+        self.welcome_label = ttk.Label(
+            self.welcome_upload_row, text="No file chosen", foreground="grey"
+        )
         self.welcome_label.grid(row=0, column=1, sticky="w", padx=4)
         self.welcome_path: Path | None = None
         self.welcome_choose_button = ttk.Button(
-            self.welcome_frame, text="Choose MP3...", command=self._choose_welcome
+            self.welcome_upload_row, text="Choose MP3...", command=self._choose_welcome
         )
         self.welcome_choose_button.grid(row=0, column=2, padx=4)
         self.welcome_listen_button: ttk.Button | None = None
         self.welcome_listen_url: str | None = None
+
+        # -- Text-to-speech sub-section --
+        self.welcome_tts_row = ttk.Frame(self.welcome_frame)
+        self.welcome_tts_row.grid(row=2, column=0, columnspan=4, sticky="w", padx=4, pady=4)
+        ttk.Label(self.welcome_tts_row, text="Message text:").grid(row=0, column=0, sticky="nw")
+        self.welcome_tts_text = tk.Text(self.welcome_tts_row, width=70, height=4, wrap="word")
+        self.welcome_tts_text.grid(row=0, column=1, padx=4)
+        ttk.Label(
+            self.welcome_frame,
+            text="Spoken using Twilio's free Basic-tier British English voice. There's no "
+            "Scottish-accented voice available — Twilio's UK catalogue only offers generic "
+            "English (UK) voices.",
+            foreground="grey", wraplength=680, justify="left",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", padx=4, pady=(0, 4))
+
+        self._refresh_welcome_mode()
+
+    def _refresh_welcome_mode(self):
+        if self.welcome_mode_var.get() == "upload":
+            self.welcome_upload_row.grid()
+            self.welcome_tts_row.grid_remove()
+        else:
+            self.welcome_tts_row.grid()
+            self.welcome_upload_row.grid_remove()
 
     def _build_mode_section(self):
         frame = ttk.LabelFrame(self, text="Call flow")
@@ -270,6 +332,20 @@ class ChurchPhoneLineApp(tk.Tk):
         ttk.Button(self.menu_frame, text="+ Add option", command=self._add_option_row).pack(
             anchor="w", pady=4
         )
+
+        self.announce_options_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self.menu_frame,
+            text="Read out the menu options automatically (e.g. \"Press 1 for the "
+            "Sunday sermon\")",
+            variable=self.announce_options_var,
+        ).pack(anchor="w", pady=(8, 0))
+        ttk.Label(
+            self.menu_frame,
+            text="Untick this if your welcome message already explains the options, "
+            "to avoid repeating them.",
+            foreground="grey", wraplength=680, justify="left",
+        ).pack(anchor="w", padx=(20, 0))
 
         self._refresh_mode()
 
@@ -323,17 +399,23 @@ class ChurchPhoneLineApp(tk.Tk):
         if not call_config or not domain_name:
             return
 
-        if call_config.get("welcome_path"):
+        if call_config.get("welcome_tts"):
+            self.welcome_mode_var.set("tts")
+            self.welcome_tts_text.insert("1.0", call_config["welcome_tts"])
+        elif call_config.get("welcome_path"):
+            self.welcome_mode_var.set("upload")
             self.welcome_listen_url = asset_url(domain_name, call_config["welcome_path"])
             self.welcome_label.config(text="Currently deployed message", foreground="black")
             self.welcome_choose_button.config(text="Replace MP3...")
             self.welcome_listen_button = ttk.Button(
-                self.welcome_frame, text="\u25b6 Listen",
+                self.welcome_upload_row, text="\u25b6 Listen",
                 command=lambda: webbrowser.open(self.welcome_listen_url),
             )
             self.welcome_listen_button.grid(row=0, column=3, padx=4)
+        self._refresh_welcome_mode()
 
         self.mode_var.set(call_config.get("mode", "single"))
+        self.announce_options_var.set(call_config.get("announce_options", True))
 
         if call_config.get("mode") == "single" and call_config.get("recording_path"):
             self.recording_listen_url = asset_url(domain_name, call_config["recording_path"])
@@ -477,8 +559,12 @@ class ChurchPhoneLineApp(tk.Tk):
             else:
                 if not self.search_results_var.get():
                     return "Search for and select a number to buy first."
-        if not self.welcome_path and not self.welcome_listen_url:
-            return "Choose a welcome message MP3."
+        if self.welcome_mode_var.get() == "upload":
+            if not self.welcome_path and not self.welcome_listen_url:
+                return "Choose a welcome message MP3."
+        else:
+            if not self.welcome_tts_text.get("1.0", "end").strip():
+                return "Type the welcome message text."
         if self.mode_var.get() == "single":
             if not self.recording_path and not self.recording_listen_url:
                 return "Choose a recording MP3."
@@ -522,9 +608,12 @@ class ChurchPhoneLineApp(tk.Tk):
         form = {
             "account_sid": self.account_sid_var.get().strip(),
             "auth_token": self.auth_token_var.get().strip(),
+            "welcome_mode": self.welcome_mode_var.get(),
             "welcome_path": self.welcome_path,
+            "welcome_tts": self.welcome_tts_text.get("1.0", "end").strip(),
             "mode": self.mode_var.get(),
             "recording_path": self.recording_path,
+            "announce_options": self.announce_options_var.get(),
             "options": [
                 (row.digit_var.get(), row.label_var.get().strip(), row.file_path)
                 for row in self.option_rows
@@ -611,8 +700,14 @@ class ChurchPhoneLineApp(tk.Tk):
                 any_asset_changed = True
                 return version_sid
 
-            welcome_version = resolve_asset("/welcome.mp3", "welcome", form["welcome_path"])
-            asset_version_sids.append(welcome_version)
+            welcome_version = None
+            if form["welcome_mode"] == "tts":
+                log("Welcome message: using text-to-speech, no file to upload.")
+                welcome_fields = {"welcome_tts": form["welcome_tts"]}
+            else:
+                welcome_version = resolve_asset("/welcome.mp3", "welcome", form["welcome_path"])
+                asset_version_sids.append(welcome_version)
+                welcome_fields = {"welcome_path": "/welcome.mp3"}
 
             if form["mode"] == "single":
                 recording_version = resolve_asset(
@@ -621,8 +716,8 @@ class ChurchPhoneLineApp(tk.Tk):
                 asset_version_sids.append(recording_version)
                 call_config = {
                     "mode": "single",
-                    "welcome_path": "/welcome.mp3",
                     "recording_path": "/recording.mp3",
+                    **welcome_fields,
                 }
             else:
                 options_config = {}
@@ -633,8 +728,9 @@ class ChurchPhoneLineApp(tk.Tk):
                     options_config[digit] = {"label": label, "path": asset_path}
                 call_config = {
                     "mode": "menu",
-                    "welcome_path": "/welcome.mp3",
+                    "announce_options": form["announce_options"],
                     "options": options_config,
+                    **welcome_fields,
                 }
 
             needs_build = function_changed or any_asset_changed or not self.existing_config

@@ -63,13 +63,24 @@ python3 app.py
      `0113` for Leeds, `020` for London) to narrow the search, click
      **Search**, then pick a specific number from the results. Leave
      the area code blank to search nationally.
-3. Choose the welcome message MP3.
+3. Set the welcome message, either:
+   - **Upload an MP3**, or
+   - **Type a message** to have it read out with text-to-speech, in a
+     British English voice (Twilio's free Basic-tier "woman" voice,
+     paired with the en-GB locale). There's no Scottish-accented option
+     — Twilio's TTS catalogue only offers a generic "English (UK)"
+     accent at any tier (Basic, Standard, Neural or Generative).
 4. Pick a call flow:
    - **Single recording** — plays the welcome message, then one
      recording, then hangs up.
-   - **Menu** — plays the welcome message, then reads out the menu
-     options (e.g. "Press 1 for the Sunday sermon"), and plays the
-     recording matching whichever digit the caller presses.
+   - **Menu** — plays the welcome message, then (unless switched off)
+     reads out the menu options (e.g. "Press 1 for the Sunday sermon"),
+     and plays the recording matching whichever digit the caller
+     presses. **Callers can press a digit at any point, including while
+     the welcome message is still playing** — they don't have to wait
+     for it to finish. Untick **"Read out the menu options
+     automatically"** if your welcome message (or recording) already
+     explains the options, so they aren't announced twice.
 5. Click **Provision / update phone line**. Progress is shown in the
    log panel.
 6. Once complete, the phone number is shown — call it to test.
@@ -79,8 +90,10 @@ python3 app.py
 Run the app again. Once a line has been provisioned, the app skips
 number selection entirely, shows "Existing line found: <number>", and
 pre-fills the current welcome message, mode, and (in menu mode) every
-option's digit and label — each with a **▶ Listen** button so you can
-hear exactly what's currently live before deciding what to change.
+option's digit and label. Uploaded MP3s each get a **▶ Listen** button
+so you can hear exactly what's currently live before deciding what to
+change; a text-to-speech welcome message is pre-filled directly into
+the text box, ready to review or edit in place.
 
 Leave a file picker untouched to keep that recording as-is; only choose
 a replacement MP3 for the parts you actually want to change. **Only
@@ -189,5 +202,24 @@ going ahead — nothing is purchased silently.
 - `app.py` — the Tkinter GUI.
 - To package this as a standalone executable for non-technical users,
   use [PyInstaller](https://pyinstaller.org/):
-  `pyinstaller --onefile --add-data "functions:functions" app.py`
-  (bundle the `functions/` folder alongside the executable).
+
+  ```bash
+  pyinstaller --onefile --add-data "functions:functions" app.py
+  ```
+
+  On Windows, `--add-data` uses a semicolon instead of a colon:
+  `--add-data "functions;functions"`.
+
+  `app.py` already handles the two path complications this introduces:
+  - `config.json` is written next to the `.exe`/binary itself (via
+    `sys.executable`), not wherever PyInstaller happens to unpack to,
+    so saved credentials and change-detection persist between runs.
+  - `functions/voice.js` is read from PyInstaller's temporary bundle
+    directory (`sys._MEIPASS`), since in `--onefile` mode the
+    `functions/` folder isn't extracted next to the `.exe` — it only
+    exists inside that temporary unpack location while the app is
+    running.
+
+  If you build with `--onedir` instead of `--onefile`, both of these
+  still work correctly, since everything ends up in the same output
+  folder anyway.
